@@ -1,0 +1,1 @@
+-keep class fel.quill.android.** { *; }
