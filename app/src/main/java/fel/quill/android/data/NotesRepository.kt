@@ -280,6 +280,24 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
         buildLibrary()
     }
 
+    fun importNotes(entries: List<Pair<String, String>>, config: BridgeConfig?): Int {
+        var imported = 0
+        entries.forEach { (path, content) ->
+            val target = runCatching { resolveLocal(path) }.getOrNull() ?: return@forEach
+            val existed = target.isFile
+            val oldContent = if (existed) readLocal(path) else null
+            val ok = runCatching {
+                pushUndo(UndoEntry(path, oldContent))
+                writeLocal(target, content)
+                if (config != null && usesBridgeInternal) {
+                    outbox.putWrite(PendingWrite(path, content, null, false))
+                }
+            }.isSuccess
+            if (ok) imported++
+        }
+        return imported
+    }
+
     private fun queueWrite(path: String, content: String, etag: String?, create: Boolean) {
         val existingWrite = outbox.writeFor(path)
         val existingDelete = outbox.deleteFor(path)

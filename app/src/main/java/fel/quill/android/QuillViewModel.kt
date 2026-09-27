@@ -533,21 +533,33 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importFolder(uri: android.net.Uri) {
         val store = QuillGraph.folderStore(getApplication())
+        val config = _state.value.config
         viewModelScope.launch {
             _state.update { it.copy(busy = true, message = null) }
-            val result = runCatching { QuillGraph.withSyncLock { store.import(uri) } }.getOrNull()
+            val result = runCatching {
+                QuillGraph.withSyncLock {
+                    val (entries, skipped) = store.collectForImport(uri)
+                    val imported = repository.importNotes(entries, config)
+                    Triple(imported, skipped, entries.size)
+                }
+            }.getOrNull()
+            if (result == null) {
+                _state.update { it.copy(busy = false, message = "Could not read that folder") }
+                return@launch
+            }
+            val (imported, skipped, total) = result
             val library = QuillGraph.withSyncLock { repository.loadLocal() }
             _state.update {
                 it.copy(
                     library = library,
                     busy = false,
+                    pendingChanges = repository.pendingCount(),
                     message = when {
-                        result == null -> "Could not read that folder"
-                        result.imported == 0 && result.skipped > 0 -> "Nothing imported: those notes are encrypted"
-                        result.imported == 0 && result.overwritten == 0 && result.failed > 0 -> "Import failed for ${result.failed} file(s)"
-                        result.overwritten > 0 -> "Imported ${result.imported}, replaced ${result.overwritten}"
-                        result.failed > 0 -> "Imported ${result.imported}, ${result.failed} failed"
-                        else -> "Imported ${result.imported} note(s)"
+                        total == 0 && skipped > 0 -> "Nothing imported: those notes are encrypted"
+                        total == 0 -> "No Markdown files in that folder"
+                        skipped > 0 -> "Imported $imported, skipped $skipped"
+                        config != null -> "Imported $imported note(s); uploading to your PC"
+                        else -> "Imported $imported note(s)"
                     },
                 )
             }

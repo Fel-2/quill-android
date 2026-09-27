@@ -6,7 +6,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
-data class ImportResult(val imported: Int, val skipped: Int, val overwritten: Int, val failed: Int)
 data class ExportResult(val written: Int, val failed: Int, val detail: String)
 
 class FolderStore(context: Context, private val crypto: NoteCrypto) {
@@ -30,31 +29,20 @@ class FolderStore(context: Context, private val crypto: NoteCrypto) {
         preferences.edit().remove("tree").apply()
     }
 
-    suspend fun import(treeUri: Uri): ImportResult = withContext(Dispatchers.IO) {
+    suspend fun collectForImport(treeUri: Uri): Pair<List<Pair<String, String>>, Int> = withContext(Dispatchers.IO) {
         val tree = DocumentTree(appContext, treeUri)
-        var imported = 0
+        val entries = mutableListOf<Pair<String, String>>()
         var skipped = 0
-        var overwritten = 0
-        var failed = 0
         collect(tree, treeUri).forEach { (relative, entry) ->
             val content = tree.read(entry.uri)
-            val target = runCatching { resolveLocal(relative) }.getOrNull()
             when {
-                content == null -> failed++
-                target == null -> failed++
+                content == null -> skipped++
                 crypto.isEncrypted(content.toByteArray(Charsets.UTF_8)) -> skipped++
-                else -> {
-                    val existed = target.isFile
-                    runCatching {
-                        target.parentFile?.mkdirs()
-                        target.writeText(content)
-                    }.onSuccess {
-                        if (existed) overwritten++ else imported++
-                    }.onFailure { failed++ }
-                }
+                runCatching { resolveLocal(relative) }.isFailure -> skipped++
+                else -> entries += relative to content
             }
         }
-        ImportResult(imported, skipped, overwritten, failed)
+        entries to skipped
     }
 
     suspend fun export(treeUri: Uri): ExportResult = withContext(Dispatchers.IO) {
