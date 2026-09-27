@@ -6,8 +6,8 @@ Native Android companion for the Noctalia Quill plugin. The app is written in Ko
 
 - Android Studio with JDK 17
 - Android SDK 35
-- A reachable PC bridge from `../bridge`
-- The same LAN, or a VPN if the PC is not on the local network
+
+A PC bridge is optional. The app works on its own, and can be paired with a bridge later.
 
 Gradle also needs the Android SDK. Set `ANDROID_HOME`/`ANDROID_SDK_ROOT`, or create an ignored `local.properties` file:
 
@@ -16,6 +16,12 @@ sdk.dir=/path/to/android-sdk
 ```
 
 The app does not import the desktop plugin's runtime. The bridge exposes the notes directory as conflict-safe Markdown files, while the app parses and edits the same format locally.
+
+## Standalone use
+
+The app opens directly into the notes browser without any PC. Notes, todos, the calendar, and the Markdown editor all work locally; the bridge is additive.
+
+Connect later from **Settings → Connect to a PC**. Disconnecting from the same menu keeps the notes already on the phone.
 
 ## Build
 
@@ -40,9 +46,12 @@ Run unit tests with:
 ```
 
 These are JVM tests, so `NotesRepository` (which needs an Android `Context`) is
-not covered; only the parser and the offline outbox are.
+not covered. The parser, the offline outbox, the Markdown formatter, the inline
+Markdown renderer, path safety, and connection routing are.
 
 ## Pairing
+
+Pairing is optional; the app is usable before any bridge exists. Choose **Use Quill without a PC** on the first screen, or open **Settings → Connect to a PC** at any time.
 
 1. Build and start the bridge on the PC:
 
@@ -67,13 +76,17 @@ The bridge supports several active pairing codes and per-device tokens. Use **Se
 
 - LAN discovery and PairDrop-style short-code pairing
 - Multiple paired devices through one bridge hub
+- Fully usable without a bridge, and pairable later
+- Import and export plain Markdown folders through the system folder picker
 - Pinned TLS and Android Keystore-backed token storage
 - Local Markdown cache with a durable offline outbox
 - Automatic reconnect sync and conflict preservation
 - ETag conflict detection for desktop/mobile edits
 - Todos, due dates, recurrence, priorities, tags, filters, archive, and undo
 - Calendar tab: month grid of due todos by date and time
-- Notes, search, Markdown editor/preview, Today notes, create/edit/delete
+- Notes, search, Today notes, create/edit/delete
+- Markdown editor with a formatting toolbar; bold, italic, code, links, lists, and quotes
+- Markdown preview that renders headings, code blocks, lists, quotes, and emphasis
 - Android share-sheet capture
 - Due-date notifications that fire at the todo's time, not on a 15-minute poll
 - AI capture, summaries, extraction, rewriting, Q&A, planning, and weekly review

@@ -37,11 +37,12 @@ enum class ConnectionStatus {
     CONNECTING,
     CONNECTED,
     OFFLINE,
+    STANDALONE,
     ERROR,
 }
 
 data class QuillUiState(
-    val connection: ConnectionStatus = ConnectionStatus.NEEDS_PAIRING,
+    val connection: ConnectionStatus = ConnectionStatus.STANDALONE,
     val config: BridgeConfig? = null,
     val discovered: List<DiscoveredBridge> = emptyList(),
     val library: Library = Library(),
@@ -59,6 +60,8 @@ data class QuillUiState(
     val conflicts: Int = 0,
     val conflictPaths: List<String> = emptyList(),
     val encryptCache: Boolean = false,
+    val showPairing: Boolean = false,
+    val importFolderName: String? = null,
     val busy: Boolean = false,
     val message: String? = null,
 )
@@ -87,6 +90,7 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
         }
         val saved = secureStore.loadBridge()
         if (saved != null) {
+            repository.setBridgeEnabled(true)
             _state.update { it.copy(config = saved, connection = ConnectionStatus.CONNECTING) }
             viewModelScope.launch { connectAndSync(saved) }
         }
@@ -99,6 +103,20 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    fun startStandalone() {
+        repository.setBridgeEnabled(false)
+        _state.update { it.copy(connection = ConnectionStatus.STANDALONE, showPairing = false, message = null) }
+    }
+
+    fun openPairing() {
+        _state.update { it.copy(showPairing = true) }
+    }
+
+    fun closePairing() {
+        val hasBridge = _state.value.config != null
+        _state.update { it.copy(showPairing = false, connection = if (hasBridge) it.connection else ConnectionStatus.STANDALONE) }
     }
 
     fun discover() {
@@ -130,7 +148,8 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 val paired = bridgeClient.pair(config, code, config.deviceName)
                 secureStore.saveBridge(paired)
-                _state.update { it.copy(config = paired) }
+                repository.setBridgeEnabled(true)
+                _state.update { it.copy(config = paired, showPairing = false) }
                 connectAndSync(paired)
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
@@ -171,7 +190,7 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     fun capture() {
         val text = _state.value.captureText.trim()
         if (text.isBlank()) return
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         _state.update { it.copy(captureText = "", busy = true, message = null) }
         viewModelScope.launch {
             try {
@@ -181,21 +200,21 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
                     }.let { if (it.isEmpty()) "" else "Existing projects:\n$it" }
                     val result = runCatching { aiClient.capture(_state.value.aiConfig, text, projects) }.getOrNull()
                     if (result != null && result.kind == "note") {
-                        val created = QuillGraph.withSyncLock { repository.createNote(config, result.text, result.body) }
+                        val created = QuillGraph.withSyncLock { repository.createNote(result.text, result.body, config) }
                         _state.update { it.copy(library = created.second, selectedNote = created.first, noteTitleDraft = created.first.title, editorText = created.first.body, tab = AppTab.NOTES) }
                     } else {
-                        val library = QuillGraph.withSyncLock { repository.addTodo(config, result?.text ?: text, result?.file, result?.due, result?.tags.orEmpty(), result?.priority ?: 0, result?.time) }
+                        val library = QuillGraph.withSyncLock { repository.addTodo(result?.text ?: text, result?.file, result?.due, result?.tags.orEmpty(), result?.priority ?: 0, result?.time, config) }
                         _state.update { it.copy(library = library, message = localMessage("Added todo")) }
                     }
                 } else {
                     val (hintDue, hintTime) = MarkdownParser.parseDueHint(text)
-                    val library = QuillGraph.withSyncLock { repository.addTodo(config, text, null, hintDue, emptyList(), 0, hintTime) }
+                    val library = QuillGraph.withSyncLock { repository.addTodo(text, null, hintDue, emptyList(), 0, hintTime, config) }
                     _state.update { it.copy(library = library, message = if (hintDue != null || hintTime != null) "Added todo with a due date" else "Added todo") }
                 }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
                 val (hintDue, hintTime) = MarkdownParser.parseDueHint(text)
-                val fallback = runCatching { QuillGraph.withSyncLock { repository.addTodo(config, text, null, hintDue, emptyList(), 0, hintTime) } }.getOrNull()
+                val fallback = runCatching { QuillGraph.withSyncLock { repository.addTodo(text, null, hintDue, emptyList(), 0, hintTime, config) } }.getOrNull()
                 _state.update { it.copy(library = fallback ?: it.library, message = if (fallback != null) "AI unavailable; added as a todo" else (error.message ?: "Capture failed")) }
             } finally {
                 _state.update { it.copy(busy = false, pendingChanges = repository.pendingCount(), conflicts = repository.conflictCount(), conflictPaths = repository.conflictPaths()) }
@@ -204,30 +223,30 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleTodo(todo: Todo) {
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         launchTask {
-            val library = QuillGraph.withSyncLock { repository.toggleTodo(config, todo, !todo.done) }
+            val library = QuillGraph.withSyncLock { repository.toggleTodo(todo, !todo.done, config) }
             _state.update { it.copy(library = library, message = localMessage(if (todo.done) "Todo reopened" else "Todo completed")) }
         }
     }
 
     fun cycleDue(todo: Todo) {
-        val config = _state.value.config ?: return
-        launchTask { _state.update { it.copy(library = QuillGraph.withSyncLock { repository.cycleDue(config, todo) }) } }
+        val config = _state.value.config
+        launchTask { _state.update { it.copy(library = QuillGraph.withSyncLock { repository.cycleDue(todo, config) }) } }
     }
 
     fun setTodoDue(todo: Todo, due: String?, time: String?) {
-        val config = _state.value.config ?: return
-        launchTask { _state.update { it.copy(library = QuillGraph.withSyncLock { repository.setTodoDue(config, todo, due, time) }) } }
+        val config = _state.value.config
+        launchTask { _state.update { it.copy(library = QuillGraph.withSyncLock { repository.setTodoDue(todo, due, time, config) }) } }
     }
 
     fun deleteTodo(todo: Todo) {
-        val config = _state.value.config ?: return
-        launchTask { _state.update { it.copy(library = QuillGraph.withSyncLock { repository.deleteTodo(config, todo) }, message = localMessage("Todo deleted")) } }
+        val config = _state.value.config
+        launchTask { _state.update { it.copy(library = QuillGraph.withSyncLock { repository.deleteTodo(todo, config) }, message = localMessage("Todo deleted")) } }
     }
 
     fun archiveCompleted() {
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         launchTask { _state.update { it.copy(library = QuillGraph.withSyncLock { repository.archiveCompleted(config) }, message = localMessage("Completed todos archived")) } }
     }
 
@@ -254,21 +273,21 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun newNote() {
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         launchTask {
-            val created = QuillGraph.withSyncLock { repository.createNote(config, "Untitled") }
+            val created = QuillGraph.withSyncLock { repository.createNote("Untitled", config = config) }
             _state.update { it.copy(library = created.second, selectedNote = created.first, noteTitleDraft = created.first.title, editorText = created.first.body, tab = AppTab.NOTES) }
         }
     }
 
     fun saveNote() {
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         val note = _state.value.selectedNote ?: return
         val body = _state.value.editorText
         val title = _state.value.noteTitleDraft.trim().ifBlank { note.title }
         val expectedEtag = selectedEtag
         launchTask {
-            val library = QuillGraph.withSyncLock { repository.saveNote(config, note, body, title, expectedEtag) }
+            val library = QuillGraph.withSyncLock { repository.saveNote(note, body, title, expectedEtag, config) }
             val refreshed = library.notes.firstOrNull { it.path == note.path }
             selectedEtag = repository.localEtag(note.path)
             val conflicted = repository.conflictFor(note.path)
@@ -291,7 +310,7 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
         }
         launchTask {
             QuillGraph.withSyncLock {
-                repository.write(config, note.path, conflict.localContent, create = conflict.remoteEtag.isBlank(), expectedEtag = conflict.remoteEtag)
+                repository.write(note.path, conflict.localContent, create = conflict.remoteEtag.isBlank(), expectedEtag = conflict.remoteEtag, config = config)
             }
             val library = repository.loadLocal()
             selectedEtag = repository.localEtag(note.path)
@@ -328,11 +347,11 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteNote() {
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         val note = _state.value.selectedNote ?: return
         launchTask {
-            val library = QuillGraph.withSyncLock { repository.deleteNote(config, note) }
-            _state.update { it.copy(library = library, selectedNote = null, noteTitleDraft = "", editorText = "", message = "Note deleted") }
+            val library = QuillGraph.withSyncLock { repository.deleteNote(note, config) }
+            _state.update { it.copy(library = library, selectedNote = null, noteTitleDraft = "", editorText = "", message = localMessage("Note deleted")) }
         }
     }
 
@@ -343,7 +362,6 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
             runCommand(question)
             return
         }
-        val config = _state.value.config ?: return
         val ai = _state.value.aiConfig
         _state.update { it.copy(askText = "", askMessages = it.askMessages + AskMessage("user", question), busy = true, message = null) }
         viewModelScope.launch {
@@ -362,7 +380,6 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun runPlan() {
-        val config = _state.value.config ?: return
         val todos = _state.value.library.todos.filter { !it.done }.take(40).map { it.text }
         if (todos.isEmpty()) {
             _state.update { it.copy(message = "No open todos to plan") }
@@ -421,7 +438,7 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun extractSelectedTodos() {
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         val note = _state.value.selectedNote ?: return
         val body = _state.value.editorText
         _state.update { it.copy(busy = true, message = null) }
@@ -431,7 +448,7 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
                 var library = _state.value.library
                 QuillGraph.withSyncLock {
                     todos.forEach { todo ->
-                        library = repository.addTodo(config, todo.text, null, todo.due, emptyList(), todo.priority, todo.time)
+                        library = repository.addTodo(todo.text, null, todo.due, emptyList(), todo.priority, todo.time, config)
                     }
                 }
                 _state.update { it.copy(library = library, message = localMessage("Added ${todos.size} todo(s) to Inbox.md")) }
@@ -463,7 +480,7 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun undo() {
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         if (!repository.canUndo()) {
             _state.update { it.copy(message = "Nothing to undo") }
             return
@@ -483,7 +500,7 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openDaily() {
-        val config = _state.value.config ?: return
+        val config = _state.value.config
         launchTask {
             val opened = QuillGraph.withSyncLock { repository.openDaily(config) }
             _state.update { it.copy(library = opened.second, selectedNote = opened.first, noteTitleDraft = opened.first.title, editorText = opened.first.body, tab = AppTab.NOTES) }
@@ -492,7 +509,13 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
 
     fun forgetBridge() {
         secureStore.clearBridge()
-        _state.value = QuillUiState(aiConfig = _state.value.aiConfig, pendingChanges = repository.pendingCount(), conflicts = repository.conflictCount(), conflictPaths = repository.conflictPaths())
+        repository.setBridgeEnabled(false)
+        _state.value = QuillUiState(
+            aiConfig = _state.value.aiConfig,
+            pendingChanges = repository.pendingCount(),
+            conflicts = repository.conflictCount(),
+            conflictPaths = repository.conflictPaths(),
+        )
     }
 
     fun createPairingCode() {
@@ -506,6 +529,61 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
     fun saveAiConfig(config: AiConfig) {
         secureStore.saveAi(config)
         _state.update { it.copy(aiConfig = config) }
+    }
+
+    fun importFolder(uri: android.net.Uri) {
+        val store = QuillGraph.folderStore(getApplication())
+        viewModelScope.launch {
+            _state.update { it.copy(busy = true, message = null) }
+            val result = runCatching { QuillGraph.withSyncLock { store.import(uri) } }.getOrNull()
+            val library = QuillGraph.withSyncLock { repository.loadLocal() }
+            _state.update {
+                it.copy(
+                    library = library,
+                    busy = false,
+                    message = when {
+                        result == null -> "Could not read that folder"
+                        result.imported == 0 && result.skipped > 0 -> "Nothing imported: those notes are encrypted"
+                        result.imported == 0 && result.overwritten == 0 && result.failed > 0 -> "Import failed for ${result.failed} file(s)"
+                        result.overwritten > 0 -> "Imported ${result.imported}, replaced ${result.overwritten}"
+                        result.failed > 0 -> "Imported ${result.imported}, ${result.failed} failed"
+                        else -> "Imported ${result.imported} note(s)"
+                    },
+                )
+            }
+        }
+    }
+
+    fun exportFolder(uri: android.net.Uri) {
+        val store = QuillGraph.folderStore(getApplication())
+        viewModelScope.launch {
+            _state.update { it.copy(busy = true, message = null) }
+            val result = runCatching { QuillGraph.withSyncLock { store.export(uri) } }.getOrNull()
+            _state.update {
+                it.copy(
+                    busy = false,
+                    message = when {
+                        result == null -> "Could not write to that folder"
+                        result.written == 0 && result.failed == 0 -> result.detail
+                        result.failed > 0 -> "Exported ${result.written}, ${result.failed} failed: ${result.detail}"
+                        else -> "Exported ${result.written} note(s) to ${result.detail}"
+                    },
+                )
+            }
+        }
+    }
+
+    fun rememberExportFolder(uri: android.net.Uri) {
+        QuillGraph.folderStore(getApplication()).rememberTree(uri)
+        _state.update { it.copy(message = "Folder remembered for export") }
+    }
+
+    fun checkFolder(uri: android.net.Uri) {
+        val store = QuillGraph.folderStore(getApplication())
+        viewModelScope.launch {
+            val report = runCatching { QuillGraph.withSyncLock { store.diagnose(uri) } }.getOrElse { it.message ?: "unknown error" }
+            _state.update { it.copy(message = report) }
+        }
     }
 
     fun setCacheEncryption(enabled: Boolean) {
@@ -568,8 +646,8 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
             }
             "/note" -> if (rest.isBlank()) _state.update { it.copy(message = "Usage: /note <title>") } else {
                 val config = _state.value.config
-                if (config != null) launchTask {
-                    val created = QuillGraph.withSyncLock { repository.createNote(config, rest) }
+                launchTask {
+                    val created = QuillGraph.withSyncLock { repository.createNote(rest, config = config) }
                     _state.update { it.copy(library = created.second, selectedNote = created.first, noteTitleDraft = created.first.title, editorText = created.first.body, tab = AppTab.NOTES) }
                 }
             }
@@ -582,9 +660,9 @@ class QuillViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update { it.copy(message = "Nothing to save yet") }
                 } else {
                     val config = _state.value.config
-                    if (config != null) launchTask {
+                    launchTask {
                         val title = rest.ifBlank { "AI answer" }
-                        val created = QuillGraph.withSyncLock { repository.createNote(config, title, answer) }
+                        val created = QuillGraph.withSyncLock { repository.createNote(title, answer, config) }
                         _state.update { it.copy(library = created.second, message = "Saved as ${created.first.title}") }
                     }
                 }

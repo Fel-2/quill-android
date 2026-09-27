@@ -97,6 +97,14 @@ class OfflineOutbox(private val file: File, private val crypto: NoteCrypto? = nu
         persist()
     }
 
+    @Synchronized
+    fun clear() {
+        writes.clear()
+        deletes.clear()
+        conflicts.clear()
+        persist()
+    }
+
     private fun load() {
         if (!file.isFile) return
         runCatching {

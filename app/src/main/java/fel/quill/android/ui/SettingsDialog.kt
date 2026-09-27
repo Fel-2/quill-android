@@ -1,5 +1,7 @@
 package fel.quill.android.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import fel.quill.android.ConnectionStatus
 import fel.quill.android.QuillUiState
 import fel.quill.android.QuillViewModel
 import fel.quill.android.model.AiConfig
@@ -51,6 +54,15 @@ fun SettingsDialog(state: QuillUiState, viewModel: QuillViewModel, onDismiss: ()
     var aiCapture by remember(state.aiConfig) { mutableStateOf(state.aiConfig.aiCapture) }
     var encryptCache by remember(state.encryptCache) { mutableStateOf(state.encryptCache) }
     var providerMenu by remember { mutableStateOf(false) }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let(viewModel::importFolder)
+    }
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let(viewModel::exportFolder)
+    }
+    val checkLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let(viewModel::checkFolder)
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -60,6 +72,31 @@ fun SettingsDialog(state: QuillUiState, viewModel: QuillViewModel, onDismiss: ()
                 modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                Text("Your PC", style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
+                Text(
+                    when (state.connection) {
+                        ConnectionStatus.STANDALONE -> "Not connected. Notes are kept on this device."
+                        ConnectionStatus.CONNECTED -> "Connected to ${state.config?.host ?: "your PC"}."
+                        ConnectionStatus.OFFLINE -> "Paired with ${state.config?.host ?: "your PC"}, currently offline."
+                        else -> "Not connected."
+                    },
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                )
+                val hasBridge = state.config != null
+                TextButton(onClick = {
+                    if (hasBridge) viewModel.forgetBridge() else viewModel.openPairing()
+                    onDismiss()
+                }) {
+                    Text(if (hasBridge) "Disconnect from PC" else "Connect to a PC")
+                }
+                if (hasBridge) {
+                    TextButton(onClick = viewModel::createPairingCode, enabled = !state.busy) {
+                        Text("Create code for another device")
+                    }
+                    state.pairingCode?.let { code ->
+                        Text("Pairing code: $code", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                    }
+                }
                 Text("AI provider", style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
                 androidx.compose.material3.OutlinedButton(
                     onClick = { providerMenu = true },
@@ -91,16 +128,6 @@ fun SettingsDialog(state: QuillUiState, viewModel: QuillViewModel, onDismiss: ()
                 }
                 Text("Keys are encrypted with a key held by Android Keystore.", style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
                 Text("${state.pendingChanges} pending change(s) · ${state.conflicts} conflict(s)", style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
-                TextButton(onClick = viewModel::createPairingCode, enabled = !state.busy) {
-                    Text("Create code for another device")
-                }
-                state.pairingCode?.let { code ->
-                    Text("Pairing code: $code", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                }
-                TextButton(onClick = {
-                    viewModel.forgetBridge()
-                    onDismiss()
-                }) { Text("Forget paired PC") }
                 Text("Local cache", style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -109,6 +136,22 @@ fun SettingsDialog(state: QuillUiState, viewModel: QuillViewModel, onDismiss: ()
                         style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     )
                     Switch(checked = encryptCache, onCheckedChange = { encryptCache = it })
+                }
+                Text("Folders", style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
+                Text(
+                    "Copy notes in from a folder on this device, or write them out to one as plain Markdown.",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { importLauncher.launch(null) }, enabled = !state.busy) {
+                        Text("Import folder")
+                    }
+                    TextButton(onClick = { exportLauncher.launch(null) }, enabled = !state.busy) {
+                        Text("Export folder")
+                    }
+                    TextButton(onClick = { checkLauncher.launch(null) }, enabled = !state.busy) {
+                        Text("Check folder")
+                    }
                 }
             }
         },

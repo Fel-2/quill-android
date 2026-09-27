@@ -103,21 +103,17 @@ fun QuillApp(sharedText: String? = null, pairingUri: Uri? = null, viewModel: Qui
     }
     LaunchedEffect(state.message) {
         state.message?.let {
-            if (state.connection == ConnectionStatus.CONNECTED || state.connection == ConnectionStatus.OFFLINE) {
+            if (!state.showPairing) {
                 snackbar.showSnackbar(it)
                 viewModel.clearMessage()
             }
         }
     }
 
-    when (state.connection) {
-        ConnectionStatus.NEEDS_PAIRING,
-        ConnectionStatus.CONNECTING,
-        ConnectionStatus.ERROR,
-        -> PairingScreen(state, viewModel, pairingUri)
-        ConnectionStatus.CONNECTED,
-        ConnectionStatus.OFFLINE,
-        -> {
+    when {
+        state.showPairing || state.connection == ConnectionStatus.NEEDS_PAIRING || state.connection == ConnectionStatus.CONNECTING || state.connection == ConnectionStatus.ERROR ->
+            PairingScreen(state, viewModel, pairingUri)
+        else -> {
             if (state.selectedNote != null) {
                 NoteEditorScreen(state, viewModel)
             } else {
@@ -133,7 +129,8 @@ private fun MainShell(state: QuillUiState, viewModel: QuillViewModel, snackbar: 
     var settingsOpen by remember { mutableStateOf(false) }
     val syncLabel = when {
         state.conflicts > 0 -> "${state.conflicts} conflicts"
-        state.connection == ConnectionStatus.OFFLINE -> "offline"
+        state.connection == ConnectionStatus.STANDALONE -> "on this device"
+        state.connection == ConnectionStatus.OFFLINE -> "PC offline"
         state.pendingChanges > 0 -> "${state.pendingChanges} pending"
         else -> "synced"
     }
@@ -153,8 +150,10 @@ private fun MainShell(state: QuillUiState, viewModel: QuillViewModel, snackbar: 
                     }
                 },
                 actions = {
-                    IconButton(onClick = viewModel::refresh) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = "Sync")
+                    if (state.connection != ConnectionStatus.STANDALONE) {
+                        IconButton(onClick = viewModel::refresh) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = "Sync")
+                        }
                     }
                     IconButton(onClick = { settingsOpen = true }) {
                         Icon(Icons.Outlined.Settings, contentDescription = "Settings")
@@ -256,9 +255,13 @@ private fun PairingScreen(state: QuillUiState, viewModel: QuillViewModel, pairin
                 }
                 Spacer(Modifier.width(16.dp))
                 Column {
-                    Text("Pair with Quill", style = MaterialTheme.typography.headlineMedium)
-                    Text("Keep your Markdown notes with you.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Connect to your PC", style = MaterialTheme.typography.headlineMedium)
+                    Text("Optional. Quill works on its own too.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+            }
+
+            Button(onClick = viewModel::startStandalone, modifier = Modifier.fillMaxWidth()) {
+                Text("Use Quill without a PC")
             }
 
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f))) {
@@ -457,20 +460,17 @@ fun NoteEditorScreen(state: QuillUiState, viewModel: QuillViewModel) {
                     if (state.editorText.isBlank()) {
                         Text("Nothing to preview", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     } else {
-                        MarkdownPreview(state.editorText, onWikiLink = viewModel::openWikiLink)
+                        MarkdownPreview(
+                            state.editorText,
+                            onWikiLink = viewModel::openWikiLink,
+                            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                        )
                     }
                 } else {
-                    androidx.compose.foundation.text.BasicTextField(
+                    MarkdownEditor(
                         value = state.editorText,
                         onValueChange = viewModel::setEditorText,
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp, vertical = 4.dp),
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onBackground),
-                        decorationBox = { inner ->
-                            if (state.editorText.isEmpty()) {
-                                Text("Write in Markdown…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            inner()
-                        },
+                        modifier = Modifier.fillMaxSize(),
                     )
                 }
             }

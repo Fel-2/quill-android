@@ -22,8 +22,17 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
     private val crypto = NoteCrypto(context)
     private val undoStack = ArrayDeque<UndoEntry>()
 
-    suspend fun sync(config: BridgeConfig): Library = withContext(Dispatchers.IO) {
+    val usesBridge: Boolean get() = usesBridgeInternal
+    private var usesBridgeInternal = false
+
+    fun setBridgeEnabled(enabled: Boolean) {
+        usesBridgeInternal = enabled
+        if (!enabled) outbox.clear()
+    }
+
+    suspend fun sync(config: BridgeConfig?): Library = withContext(Dispatchers.IO) {
         root.mkdirs()
+        if (config == null) return@withContext buildLibrary()
         flushPending(config)
         val manifest = bridge.manifest(config)
         val remotePaths = manifest.files.associateBy { it.path }
@@ -94,7 +103,7 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
 
     fun findNote(library: Library, path: String): NoteDocument? = library.notes.firstOrNull { it.path == path }
 
-    suspend fun write(config: BridgeConfig, path: String, content: String, create: Boolean = false, expectedEtag: String? = null): Library = withContext(Dispatchers.IO) {
+    suspend fun write(path: String, content: String, create: Boolean = false, expectedEtag: String? = null, config: BridgeConfig? = null): Library = withContext(Dispatchers.IO) {
         val currentEtag = if (create) null else localEtag(path)
         if (!create && expectedEtag != null && currentEtag != expectedEtag) {
             outbox.markConflict(path, content, currentEtag.orEmpty())
@@ -104,6 +113,7 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
         val oldContent = if (resolveLocal(path).isFile) readLocal(path) else null
         pushUndo(UndoEntry(path, oldContent))
         writeLocal(resolveLocal(path), content)
+        if (config == null || !usesBridgeInternal) return@withContext buildLibrary()
         queueWrite(path, content, currentEtag, create)
         val pending = outbox.writeFor(path)
         try {
@@ -127,7 +137,7 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
         buildLibrary()
     }
 
-    suspend fun undoLast(config: BridgeConfig): Library = withContext(Dispatchers.IO) {
+    suspend fun undoLast(config: BridgeConfig?): Library = withContext(Dispatchers.IO) {
         val entry = undoStack.removeLastOrNull() ?: return@withContext buildLibrary()
         if (entry.content == null) {
             val pendingWrite = outbox.writeFor(entry.path)
@@ -151,7 +161,7 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
 
     fun canUndo(): Boolean = undoStack.isNotEmpty()
 
-    suspend fun createNote(config: BridgeConfig, title: String, body: String = ""): Pair<NoteDocument, Library> = withContext(Dispatchers.IO) {
+    suspend fun createNote(title: String, body: String = "", config: BridgeConfig? = null): Pair<NoteDocument, Library> = withContext(Dispatchers.IO) {
         val (basePath, initialContent) = MarkdownParser.createNote(title, body)
         val existing = buildLibrary().notes.map { it.path }.toMutableSet()
         var path = basePath
@@ -160,38 +170,38 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
             path = basePath.removeSuffix(".md") + "-$suffix.md"
             suffix++
         }
-        val library = write(config, path, initialContent, create = true)
+        val library = write(path, initialContent, create = true, config = config)
         val document = library.notes.first { it.path == path }
         document to library
     }
 
-    suspend fun openDaily(config: BridgeConfig): Pair<NoteDocument, Library> = withContext(Dispatchers.IO) {
+    suspend fun openDaily(config: BridgeConfig?): Pair<NoteDocument, Library> = withContext(Dispatchers.IO) {
         val date = LocalDate.now().toString()
         val path = "Daily/$date.md"
         if (!resolveLocal(path).isFile) {
             val content = "---\ntitle: $date\ndate: $date\ntags: [daily]\n---\n\n# $date\n\n## Tasks\n\n## Notes\n\n"
-            write(config, path, content, create = true)
+            write(path, content, create = true, config = config)
         }
         val library = buildLibrary()
         val document = library.notes.first { it.path == path }
         document to library
     }
 
-    suspend fun saveNote(config: BridgeConfig, document: NoteDocument, body: String, title: String = document.title, expectedEtag: String? = null): Library {
-        return write(config, document.path, MarkdownParser.serializeBody(document, body, title), expectedEtag = expectedEtag)
+    suspend fun saveNote(document: NoteDocument, body: String, title: String = document.title, expectedEtag: String? = null, config: BridgeConfig? = null): Library {
+        return write(document.path, MarkdownParser.serializeBody(document, body, title), expectedEtag = expectedEtag, config = config)
     }
 
-    suspend fun deleteNote(config: BridgeConfig, document: NoteDocument): Library = withContext(Dispatchers.IO) {
+    suspend fun deleteNote(document: NoteDocument, config: BridgeConfig? = null): Library = withContext(Dispatchers.IO) {
         val oldContent = readLocal(document.path)
         val etag = localEtag(document.path)
         pushUndo(UndoEntry(document.path, oldContent))
         resolveLocal(document.path).delete()
-        if (etag.isNotBlank()) queueDelete(document.path, oldContent, etag)
+        if (etag.isNotBlank() && config != null && usesBridgeInternal) queueDelete(document.path, oldContent, etag)
         flushOneDelete(config, document.path)
         buildLibrary()
     }
 
-    suspend fun toggleTodo(config: BridgeConfig, todo: Todo, done: Boolean): Library = withContext(Dispatchers.IO) {
+    suspend fun toggleTodo(todo: Todo, done: Boolean, config: BridgeConfig? = null): Library = withContext(Dispatchers.IO) {
         val raw = readLocal(todo.path)
         val updated = if (done && todo.recurrence != null) {
             val next = nextRecurringDue(todo.due, todo.recurrence)
@@ -200,14 +210,14 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
         } else {
             MarkdownParser.setDone(raw, todo.line, done)
         }
-        write(config, todo.path, updated)
+        write(todo.path, updated, config = config)
     }
 
-    suspend fun deleteTodo(config: BridgeConfig, todo: Todo): Library = withContext(Dispatchers.IO) {
-        write(config, todo.path, MarkdownParser.deleteTodo(readLocal(todo.path), todo.line))
+    suspend fun deleteTodo(todo: Todo, config: BridgeConfig? = null): Library = withContext(Dispatchers.IO) {
+        write(todo.path, MarkdownParser.deleteTodo(readLocal(todo.path), todo.line), config = config)
     }
 
-    suspend fun cycleDue(config: BridgeConfig, todo: Todo): Library = withContext(Dispatchers.IO) {
+    suspend fun cycleDue(todo: Todo, config: BridgeConfig? = null): Library = withContext(Dispatchers.IO) {
         val today = LocalDate.now()
         val next = when (todo.due) {
             null, "" -> today
@@ -215,11 +225,11 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
             today.plusDays(1).toString() -> today.plusDays(7)
             else -> null
         }
-        write(config, todo.path, MarkdownParser.setDue(readLocal(todo.path), todo.line, next?.toString(), todo.time))
+        write(todo.path, MarkdownParser.setDue(readLocal(todo.path), todo.line, next?.toString(), todo.time), config = config)
     }
 
-    suspend fun setTodoDue(config: BridgeConfig, todo: Todo, due: String?, time: String?): Library = withContext(Dispatchers.IO) {
-        write(config, todo.path, MarkdownParser.setDue(readLocal(todo.path), todo.line, due, time))
+    suspend fun setTodoDue(todo: Todo, due: String?, time: String?, config: BridgeConfig? = null): Library = withContext(Dispatchers.IO) {
+        write(todo.path, MarkdownParser.setDue(readLocal(todo.path), todo.line, due, time), config = config)
     }
 
     fun resolveProjectTarget(file: String?): String {
@@ -232,32 +242,32 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
     }
 
     suspend fun addTodo(
-        config: BridgeConfig,
         text: String,
         target: String? = null,
         due: String? = null,
         tags: List<String> = emptyList(),
         priority: Int = 0,
         time: String? = null,
+        config: BridgeConfig? = null,
     ): Library = withContext(Dispatchers.IO) {
         val path = resolveProjectTarget(target)
         if (resolveLocal(path).isFile) {
-            return@withContext write(config, path, MarkdownParser.appendTodo(readLocal(path), text, due, time, tags, priority))
+            return@withContext write(path, MarkdownParser.appendTodo(readLocal(path), text, due, time, tags, priority), config = config)
         }
         val title = path.removeSuffix(".md").replace('-', ' ').replace('_', ' ')
-        val created = createNote(config, title)
+        val created = createNote(title, config = config)
         val body = MarkdownParser.appendTodo(created.first.body, text, due, time, tags, priority)
-        write(config, created.first.path, MarkdownParser.serializeBody(created.first, body, created.first.title))
+        write(created.first.path, MarkdownParser.serializeBody(created.first, body, created.first.title), config = config)
     }
 
-    suspend fun archiveCompleted(config: BridgeConfig): Library = withContext(Dispatchers.IO) {
+    suspend fun archiveCompleted(config: BridgeConfig? = null): Library = withContext(Dispatchers.IO) {
         val library = buildLibrary()
         val grouped = library.todos.filter { it.done }.groupBy { it.path }
         for ((path, todos) in grouped) {
             val raw = readLocal(path)
             val doneLines = todos.map { it.raw }
             val updated = raw.lines().filterNot { line -> doneLines.contains(line) }.joinToString("\n")
-            write(config, path, updated)
+            write(path, updated, config = config)
         }
         val archivePath = "Archive.md"
         val archive = readLocal(archivePath)
@@ -266,7 +276,7 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
         }
         val updatedArchive = (if (archive.isBlank()) "" else archive.trimEnd('\n') + "\n\n") +
             "# Archived ${LocalDate.now()}\n\n$sections\n"
-        if (resolveLocal(archivePath).isFile) write(config, archivePath, updatedArchive) else write(config, archivePath, updatedArchive, create = true)
+        if (resolveLocal(archivePath).isFile) write(archivePath, updatedArchive, config = config) else write(archivePath, updatedArchive, create = true, config = config)
         buildLibrary()
     }
 
@@ -309,7 +319,8 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
         }
     }
 
-    private suspend fun flushOneWrite(config: BridgeConfig, path: String) {
+    private suspend fun flushOneWrite(config: BridgeConfig?, path: String) {
+        if (config == null || !usesBridgeInternal) return
         val pending = outbox.writeFor(path) ?: return
         try {
             bridge.writeFile(config, pending.path, pending.content, pending.etag, pending.create)
@@ -338,7 +349,8 @@ class NotesRepository(context: Context, private val bridge: BridgeClient) {
         }
     }
 
-    private suspend fun flushOneDelete(config: BridgeConfig, path: String) {
+    private suspend fun flushOneDelete(config: BridgeConfig?, path: String) {
+        if (config == null || !usesBridgeInternal) return
         val pending = outbox.deleteFor(path) ?: return
         try {
             bridge.deleteFile(config, pending.path, pending.etag)
